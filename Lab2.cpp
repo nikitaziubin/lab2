@@ -14,8 +14,8 @@
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Car, model, year, engine_l, result)
 #define MAIN_THREAD 0
-#define DATA_THREAD_RANK 1
-#define RESULT_THREAD_RANK 2
+#define DATA_THREAD 1
+#define RESULT_THREAD 2
 #define FIRST_WORKER 3
 #define NUM_WORKERS 4
 #define DATA_TH_CAR_ARRAY_SIZE 10
@@ -87,9 +87,9 @@ string findFiveEqual(const string &s)
     return "";
 }
 
-void send_car(Car &car, string th_name, int rank, int receiver_name)
+void send_car(Car &car, string th_name, int rank, int receiver_name, int tag)
 {
-    MPI_Send(&car, sizeof(car), MPI_BYTE, receiver_name, 0, MPI_COMM_WORLD);
+    MPI_Send(&car, sizeof(car), MPI_BYTE, receiver_name, tag, MPI_COMM_WORLD);
     cout << th_name << " " << rank << ": sent car: " << car.model << " " << car.result << endl;
 }
 
@@ -139,24 +139,20 @@ int main(int argc, char **argv)
             c.result[sizeof(c.result) - 1] = '\0';
             allCars.push_back(c);
         }
-        int idx = 0;
         for(Car car : allCars){
-            int target = FIRST_WORKER + (idx % NUM_WORKERS);
-            send_car(car, "MAIN", rank, target);
-            idx++;
+            //int target = FIRST_WORKER + (idx % NUM_WORKERS);
+            send_car(car, "MAIN", rank, DATA_THREAD, 0);
+            //idx++;
         }
         cout << "=========MAIN: SEND ALL CARS=========" << endl;
 
-        for (int i = 0; i < NUM_WORKERS; ++i){
-            int target = FIRST_WORKER + i;
-            send_stop_signal(target);
-        }
+        send_stop_signal(DATA_THREAD);
         cout << "=========MAIN: SEND STOP SIGNAL=========" << endl;
 
         MPI_Status main_status;
         while (true){
             Car car;
-            main_status = receive_car(car, "MAIN", rank, RESULT_THREAD_RANK);
+            main_status = receive_car(car, "MAIN", rank, RESULT_THREAD);
             if(main_status.MPI_TAG == 1)
                 break;
             setRes.insert(car);
@@ -165,50 +161,71 @@ int main(int argc, char **argv)
         for (Car car : setRes)
             cout << car.result << " " << car.model << " " << car.year << " " << car.engine_l << " " << endl;
         cout << "Total amount of cars is: " << setRes.size() << endl;
-    } else if (rank == DATA_THREAD_RANK){
-        // data thread
-        // MPI::COMM_WORLD.Recv() 10 elements from main thread and save them to array with size 10
-        // MPI::COMM_WORLD.Send() one element from array to worker thread
-        array<Car, DATA_TH_CAR_ARRAY_SIZE> data_th_car_array;
+    } else if (rank == DATA_THREAD){
+        vector<Car> data_th_car_array;
+        data_th_car_array.reserve(DATA_TH_CAR_ARRAY_SIZE);
         MPI_Status data_status;
+        int main_request = 0; int worker_request = 0;
+        int finished_workers = 0;
+        bool main_finished = false;
+    
         while (true)
         {
-            data_status = receive_car();
-            if(data_status.MPI_TAG == 1){
-                break;
-            }
-            else if (data_status.MPI_TAG == 0 && data_th_car_array.size() - 1 != DATA_TH_CAR_ARRAY_SIZE)
+
+            MPI_Iprobe(MAIN_THREAD, 1, MPI_COMM_WORLD, &main_request, &data_status);
+            if (main_finished)
             {
-                //call from main. 
-                //check if the array is not full.
-                //receive the car and save it to the array.
+                Car car;
+                MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 1, MPI_COMM_WORLD, &data_status);
+                main_finished = true;
             }
-            else if(data_status.MPI_TAG == 2 && !data_th_car_array.empty()){
-                //call from worker. 
-                // check if array is not empty.
-                //get the car from monitor and send it to worker.
+
+            MPI_Iprobe(MAIN_THREAD, MPI_ANY_TAG, MPI_COMM_WORLD, &main_request, &data_status);
+            MPI_Iprobe(MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_request, &data_status);
+            if (main_request && (int)data_th_car_array.size() < DATA_TH_CAR_ARRAY_SIZE)
+            {
+                Car car;
+                data_status = receive_car(car, "DATA", rank, MAIN_THREAD);
+                data_th_car_array.push_back(car);
+                continue;
+            }
+            if(worker_request && !data_th_car_array.empty()){
+                //data_status = receive_car(nullptr, "DATA", rank, MPI_ANY_SOURCE);
+                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &data_status);
+                Car car = data_th_car_array.back();
+                data_th_car_array.pop_back();
+                send_car(car, "DATA", rank, data_status.MPI_SOURCE, 0);
+                continue;
+            }
+            if(worker_request && main_finished && data_th_car_array.empty()){
+                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &data_status);
+                send_stop_signal(data_status.MPI_SOURCE);
+                finished_workers++;
+                if (finished_workers == NUM_WORKERS)
+                    break;
             }
         }
     }
     else if (rank >= FIRST_WORKER && rank < FIRST_WORKER + NUM_WORKERS){
         MPI_Status work_status;
         while (true){
+            MPI_Send(nullptr, 0, MPI_BYTE, DATA_THREAD, 2, MPI_COMM_WORLD);
             Car car;
-            work_status = receive_car(car, "WORKER", rank, MAIN_THREAD);
+            work_status = receive_car(car, "WORKER", rank, DATA_THREAD);
             if (work_status.MPI_TAG == 1) break;
 
             string s = findFiveEqual(car.model);
             if ('a' <= s[0] && 'z' >= s[0]){
                 strncpy(car.result, s.c_str(), sizeof(car.result) - 1);
-                send_car(car, "WORKER", rank, RESULT_THREAD_RANK);
+                send_car(car, "WORKER", rank, RESULT_THREAD, 0);
             }
             else
                 cout << "WORKER " << rank << ": skiped car: " << car.model << " " << s << endl;
         }
         cout << "=========WORKER: SEND ALL CARS=========" << endl;
-        send_stop_signal(RESULT_THREAD_RANK);
+        send_stop_signal(RESULT_THREAD);
     }
-    else if (rank == RESULT_THREAD_RANK){
+    else if (rank == RESULT_THREAD){
         set<Car, ByResult> setRes;
         MPI_Status result_status;
         int finished = 0;
@@ -224,7 +241,7 @@ int main(int argc, char **argv)
         }
         cout << "=========RESULT RECEIVED ALL CARS=========" << endl;
         for (Car car : setRes)
-            send_car(car, "RESULT", rank, MAIN_THREAD);
+            send_car(car, "RESULT", rank, MAIN_THREAD, 0);
         send_stop_signal(MAIN_THREAD);
     }
     MPI_Finalize();
