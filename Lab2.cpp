@@ -140,9 +140,7 @@ int main(int argc, char **argv)
             allCars.push_back(c);
         }
         for(Car car : allCars){
-            //int target = FIRST_WORKER + (idx % NUM_WORKERS);
             send_car(car, "MAIN", rank, DATA_THREAD, 0);
-            //idx++;
         }
         cout << "=========MAIN: SEND ALL CARS=========" << endl;
 
@@ -164,42 +162,37 @@ int main(int argc, char **argv)
     } else if (rank == DATA_THREAD){
         vector<Car> data_th_car_array;
         data_th_car_array.reserve(DATA_TH_CAR_ARRAY_SIZE);
-        MPI_Status data_status;
+        MPI_Status main_status, worker_status;
         int main_request = 0; int worker_request = 0;
         int finished_workers = 0;
         bool main_finished = false;
-    
         while (true)
         {
-
-            MPI_Iprobe(MAIN_THREAD, 1, MPI_COMM_WORLD, &main_request, &data_status);
-            if (main_finished)
+            MPI_Iprobe(MAIN_THREAD, MPI_ANY_TAG, MPI_COMM_WORLD, &main_request, &main_status);
+            MPI_Iprobe(MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_request, &worker_status);
+            if (main_request && main_status.MPI_TAG == 1)
             {
                 Car car;
-                MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 1, MPI_COMM_WORLD, &data_status);
+                MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 1, MPI_COMM_WORLD, &main_status);
                 main_finished = true;
             }
-
-            MPI_Iprobe(MAIN_THREAD, MPI_ANY_TAG, MPI_COMM_WORLD, &main_request, &data_status);
-            MPI_Iprobe(MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_request, &data_status);
-            if (main_request && (int)data_th_car_array.size() < DATA_TH_CAR_ARRAY_SIZE)
+            if (main_request && main_status.MPI_TAG == 0 && (int)data_th_car_array.size() < DATA_TH_CAR_ARRAY_SIZE)
             {
                 Car car;
-                data_status = receive_car(car, "DATA", rank, MAIN_THREAD);
+                MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 0, MPI_COMM_WORLD, &main_status);
                 data_th_car_array.push_back(car);
                 continue;
             }
             if(worker_request && !data_th_car_array.empty()){
-                //data_status = receive_car(nullptr, "DATA", rank, MPI_ANY_SOURCE);
-                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &data_status);
+                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_status);
                 Car car = data_th_car_array.back();
                 data_th_car_array.pop_back();
-                send_car(car, "DATA", rank, data_status.MPI_SOURCE, 0);
+                send_car(car, "DATA", rank, worker_status.MPI_SOURCE, 0);
                 continue;
             }
             if(worker_request && main_finished && data_th_car_array.empty()){
-                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &data_status);
-                send_stop_signal(data_status.MPI_SOURCE);
+                MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_status);
+                send_stop_signal(worker_status.MPI_SOURCE);
                 finished_workers++;
                 if (finished_workers == NUM_WORKERS)
                     break;
