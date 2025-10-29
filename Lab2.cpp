@@ -17,8 +17,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Car, model, year, engine_l, result)
 #define DATA_THREAD 1
 #define RESULT_THREAD 2
 #define FIRST_WORKER 3
-#define NUM_WORKERS 4
-#define DATA_TH_CAR_ARRAY_SIZE 10
+//#define NUM_WORKERS 4
+#define DATA_TH_CAR_ARRAY_SIZE 5
 
 using namespace std;
 using json = nlohmann::json;
@@ -111,9 +111,19 @@ void send_stop_signal(int receiver_name){
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
-    int rank; int size;
+    int rank;
+    int size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+    int const NUM_WORKERS = size - 3;
+    if (NUM_WORKERS <= 0)
+    {
+        if (rank == MAIN_THREAD){
+            cout << "Error: Not enough processes. Please run with at least 4 processes." << endl;
+        }
+        MPI_Finalize();
+        return 0;
+    }
     cout << "Process: " << rank << " of " << size << endl;
     
     if (rank == MAIN_THREAD){
@@ -156,9 +166,24 @@ int main(int argc, char **argv)
             setRes.insert(car);
         }
         cout << "\n\n=========FINAL RESULT=========" << endl;
-        for (Car car : setRes)
-            cout << car.result << " " << car.model << " " << car.year << " " << car.engine_l << " " << endl;
-        cout << "Total amount of cars is: " << setRes.size() << endl;
+        // for (Car car : setRes)
+        //     cout << car.result << " " << car.model << " " << car.year << " " << car.engine_l << " " << endl;
+        // cout << "Total amount of cars is: " << setRes.size() << endl;
+        ofstream outFile("results.txt");
+        if (!outFile.is_open())
+        {
+            cerr << "ERROR: Could not open results.txt!" << endl;
+        }
+        if (outFile.is_open()){
+            for (const Car &car : setRes)
+            {
+                //cout << car.result << " " << car.model << " " << car.year << " " << car.engine_l << endl;
+                outFile << car.result << "\t\t" << car.model << "\t\t" << car.year << "\t" << car.engine_l << endl;
+            }
+            outFile << "Total amount of cars is: " << setRes.size() << endl;
+            outFile.close();
+        }
+        cout << "Results written to results.txt" << endl;
     } else if (rank == DATA_THREAD){
         vector<Car> data_th_car_array;
         data_th_car_array.reserve(DATA_TH_CAR_ARRAY_SIZE);
@@ -175,18 +200,23 @@ int main(int argc, char **argv)
                 Car car;
                 MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 1, MPI_COMM_WORLD, &main_status);
                 main_finished = true;
+                continue;
             }
             if (main_request && main_status.MPI_TAG == 0 && (int)data_th_car_array.size() < DATA_TH_CAR_ARRAY_SIZE)
             {
                 Car car;
                 MPI_Recv(&car, sizeof(car), MPI_BYTE, MAIN_THREAD, 0, MPI_COMM_WORLD, &main_status);
                 data_th_car_array.push_back(car);
+                if(data_th_car_array.size() == DATA_TH_CAR_ARRAY_SIZE)
+                    cout << "=========DATA: Buffer is FULL " << DATA_TH_CAR_ARRAY_SIZE << "=========" << endl;
                 continue;
             }
             if(worker_request && !data_th_car_array.empty()){
                 MPI_Recv(nullptr, 0, MPI_BYTE, MPI_ANY_SOURCE, 2, MPI_COMM_WORLD, &worker_status);
                 Car car = data_th_car_array.back();
                 data_th_car_array.pop_back();
+                if(data_th_car_array.empty())
+                    cout << "=========DATA: Buffer is EMPTY " << DATA_TH_CAR_ARRAY_SIZE << "=========" << endl;
                 send_car(car, "DATA", rank, worker_status.MPI_SOURCE, 0);
                 continue;
             }
@@ -208,14 +238,14 @@ int main(int argc, char **argv)
             if (work_status.MPI_TAG == 1) break;
 
             string s = findFiveEqual(car.model);
-            if ('a' <= s[0] && 'z' >= s[0]){
+            if (!s.empty() && 'a' <= s[0] && 'z' >= s[0]){
                 strncpy(car.result, s.c_str(), sizeof(car.result) - 1);
                 send_car(car, "WORKER", rank, RESULT_THREAD, 0);
             }
             else
                 cout << "WORKER " << rank << ": skiped car: " << car.model << " " << s << endl;
         }
-        cout << "=========WORKER: SEND ALL CARS=========" << endl;
+        cout << "=========WORKER " << rank << ": SEND ALL CARS=========" << endl;
         send_stop_signal(RESULT_THREAD);
     }
     else if (rank == RESULT_THREAD){
